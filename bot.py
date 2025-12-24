@@ -19,7 +19,7 @@ class Humanoid:
     def __init__(self) -> None:
         self.BASE_API = "https://prelaunch.humanoidnetwork.org"
         self.HF_API = "https://huggingface.co"
-        self.REF_CODE = "4FGZC3" # U can change it with yours.
+        self.REF_CODE = "5LR9D7" # U can change it with yours.
         self.HEADERS = {}
         self.proxies = []
         self.proxy_index = 0
@@ -351,9 +351,15 @@ class Humanoid:
 
         return None
     
-    async def scrape_huggingface(self, endpoint: str, limit: int, proxy_url=None, retries=5):
+    async def scrape_huggingface(self, endpoint: str, limit: int, proxy_url=None, offset=0, retries=5):
+        """Скачивание данных с HuggingFace с возможностью указать offset"""
         url = f"{self.HF_API}/api/{endpoint}"
-        params = {"limit": limit, "sort": "lastModified", "direction": -1}
+        params = {
+            "limit": limit, 
+            "sort": "lastModified", 
+            "direction": -1,
+            "offset": offset  # Добавляем offset для получения разных данных
+        }
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
@@ -374,7 +380,8 @@ class Humanoid:
 
         return None
     
-    async def submit_training(self, address: str, training_data: dict, proxy_url=None, retries=5):
+    async def submit_training(self, address: str, training_data: dict, proxy_url=None, retries=2):
+        """Отправка тренировки с минимальными попытками"""
         url = f"{self.BASE_API}/api/training"
         data = json.dumps(training_data)
         headers = {
@@ -383,17 +390,24 @@ class Humanoid:
             "Content-Length": str(len(data)),
             "Content-Type": "application/json"
         }
-        await asyncio.sleep(1)
+        
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
                     async with session.post(url=url, headers=headers, data=data, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        # Если 400 - сразу возвращаем False, чтобы попробовать следующую модель
+                        if response.status == 400:
+                            return None
+                        
                         response.raise_for_status()
-                        return await response.json()
-            except (Exception, ClientResponseError) as e:
+                        result = await response.json()
+                        return result
+                        
+            except ClientResponseError as e:
+                # Для других ошибок пробуем еще раз
                 if attempt < retries - 1:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                     continue
                 self.log(
                     f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
@@ -401,6 +415,19 @@ class Humanoid:
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
+                return None
+                    
+            except Exception as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Submit Failed {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+                return None
 
         return None
     
@@ -541,11 +568,28 @@ class Humanoid:
                 self.log(f"{Fore.GREEN+Style.BRIGHT} ● {Style.RESET_ALL}"
                     f"{Fore.WHITE+Style.BRIGHT}Models{Style.RESET_ALL}"
                 )
+                
+                models_tried = 0
+                models_successful = 0
+                offset = 0
+                max_attempts = 100  # Максимальное количество попыток
+                
                 if models_remaining > 0:
-                    models = await self.scrape_huggingface("models", models_remaining, proxy)
-                    if models:
-
+                    while models_successful < models_remaining and models_tried < max_attempts:
+                        # Скачиваем новые модели каждый раз
+                        models = await self.scrape_huggingface("models", 20, proxy, offset=offset)
+                        
+                        if not models or len(models) == 0:
+                            self.log(
+                                f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                                f"{Fore.RED+Style.BRIGHT} No more models available{Style.RESET_ALL}"
+                            )
+                            break
+                        
                         for model in models:
+                            if models_successful >= models_remaining:
+                                break
+                            
                             model_name = model["id"]
                             model_url = f"{self.HF_API}/{model['id']}"
 
@@ -558,27 +602,47 @@ class Humanoid:
 
                             self.log(
                                 f"{Fore.BLUE+Style.BRIGHT}   ==={Style.RESET_ALL}"
-                                f"{Fore.WHITE+Style.BRIGHT} {models_completed+1} Of {models_limit} {Style.RESET_ALL}"
+                                f"{Fore.WHITE+Style.BRIGHT} Attempt {models_tried+1}/{max_attempts} {Style.RESET_ALL}"
                                 f"{Fore.BLUE+Style.BRIGHT}==={Style.RESET_ALL}"
+                            )
+                            self.log(
+                                f"{Fore.BLUE+Style.BRIGHT}   Model  :{Style.RESET_ALL}"
+                                f"{Fore.WHITE+Style.BRIGHT} {model_name} {Style.RESET_ALL}"
                             )
 
                             submit = await self.submit_training(address, training_data, proxy)
                             if submit:
                                 self.log(
                                     f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
-                                    f"{Fore.GREEN+Style.BRIGHT} Model Submited Successfully {Style.RESET_ALL}"
+                                    f"{Fore.GREEN+Style.BRIGHT} ✓ Model Accepted {Style.RESET_ALL}"
                                 )
+                                models_successful += 1
+                                models_completed += 1
+                            else:
                                 self.log(
-                                    f"{Fore.BLUE+Style.BRIGHT}   Name   :{Style.RESET_ALL}"
-                                    f"{Fore.WHITE+Style.BRIGHT} {model_name} {Style.RESET_ALL}"
+                                    f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                                    f"{Fore.YELLOW+Style.BRIGHT} ✗ Model Rejected {Style.RESET_ALL}"
                                 )
-                                self.log(
-                                    f"{Fore.BLUE+Style.BRIGHT}   URL    :{Style.RESET_ALL}"
-                                    f"{Fore.WHITE+Style.BRIGHT} {model_url} {Style.RESET_ALL}"
-                                )
+                            
+                            models_tried += 1
+                            await asyncio.sleep(2)  # Задержка между попытками
+                        
+                        # Увеличиваем offset для следующей порции данных
+                        offset += len(models)
+                        
+                        if models_successful < models_remaining:
+                            self.log(
+                                f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                                f"{Fore.YELLOW+Style.BRIGHT} Loading more models... {Style.RESET_ALL}"
+                            )
+                            await asyncio.sleep(3)  # Задержка перед загрузкой новых данных
 
-                            models_completed+=1
-
+                    self.log(
+                        f"{Fore.BLUE+Style.BRIGHT}   Result :{Style.RESET_ALL}"
+                        f"{Fore.GREEN+Style.BRIGHT} Successful: {models_successful}/{models_remaining} {Style.RESET_ALL}"
+                        f"{Fore.CYAN+Style.BRIGHT} | {Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} Attempts: {models_tried} {Style.RESET_ALL}"
+                    )
                 else:
                     self.log(
                         f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
@@ -592,11 +656,28 @@ class Humanoid:
                 self.log(f"{Fore.GREEN+Style.BRIGHT} ● {Style.RESET_ALL}"
                     f"{Fore.WHITE+Style.BRIGHT}Datasets{Style.RESET_ALL}"
                 )
+                
+                datasets_tried = 0
+                datasets_successful = 0
+                offset = 0
+                max_attempts = 100  # Максимальное количество попыток
+                
                 if datasets_remaining > 0:
-                    datasets = await self.scrape_huggingface("datasets", datasets_remaining, proxy)
-                    if datasets:
-
+                    while datasets_successful < datasets_remaining and datasets_tried < max_attempts:
+                        # Скачиваем новые датасеты каждый раз
+                        datasets = await self.scrape_huggingface("datasets", 20, proxy, offset=offset)
+                        
+                        if not datasets or len(datasets) == 0:
+                            self.log(
+                                f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                                f"{Fore.RED+Style.BRIGHT} No more datasets available{Style.RESET_ALL}"
+                            )
+                            break
+                        
                         for dataset in datasets:
+                            if datasets_successful >= datasets_remaining:
+                                break
+                                
                             dataset_name = dataset["id"]
                             dataset_url = f"{self.HF_API}/datasets/{dataset['id']}"
 
@@ -609,27 +690,47 @@ class Humanoid:
 
                             self.log(
                                 f"{Fore.BLUE+Style.BRIGHT}   ==={Style.RESET_ALL}"
-                                f"{Fore.WHITE+Style.BRIGHT} {datasets_completed+1} Of {datasets_limit} {Style.RESET_ALL}"
+                                f"{Fore.WHITE+Style.BRIGHT} Attempt {datasets_tried+1}/{max_attempts} {Style.RESET_ALL}"
                                 f"{Fore.BLUE+Style.BRIGHT}==={Style.RESET_ALL}"
+                            )
+                            self.log(
+                                f"{Fore.BLUE+Style.BRIGHT}   Dataset:{Style.RESET_ALL}"
+                                f"{Fore.WHITE+Style.BRIGHT} {dataset_name} {Style.RESET_ALL}"
                             )
 
                             submit = await self.submit_training(address, training_data, proxy)
                             if submit:
                                 self.log(
                                     f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
-                                    f"{Fore.GREEN+Style.BRIGHT} Dataset Submited Successfully {Style.RESET_ALL}"
+                                    f"{Fore.GREEN+Style.BRIGHT} ✓ Dataset Accepted {Style.RESET_ALL}"
                                 )
+                                datasets_successful += 1
+                                datasets_completed += 1
+                            else:
                                 self.log(
-                                    f"{Fore.BLUE+Style.BRIGHT}   Name   :{Style.RESET_ALL}"
-                                    f"{Fore.WHITE+Style.BRIGHT} {dataset_name} {Style.RESET_ALL}"
+                                    f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                                    f"{Fore.YELLOW+Style.BRIGHT} ✗ Dataset Rejected {Style.RESET_ALL}"
                                 )
-                                self.log(
-                                    f"{Fore.BLUE+Style.BRIGHT}   URL    :{Style.RESET_ALL}"
-                                    f"{Fore.WHITE+Style.BRIGHT} {dataset_url} {Style.RESET_ALL}"
-                                )
+                            
+                            datasets_tried += 1
+                            await asyncio.sleep(2)  # Задержка между попытками
+                        
+                        # Увеличиваем offset для следующей порции данных
+                        offset += len(datasets)
+                        
+                        if datasets_successful < datasets_remaining:
+                            self.log(
+                                f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
+                                f"{Fore.YELLOW+Style.BRIGHT} Loading more datasets... {Style.RESET_ALL}"
+                            )
+                            await asyncio.sleep(3)  # Задержка перед загрузкой новых данных
 
-                            datasets_completed+=1
-
+                    self.log(
+                        f"{Fore.BLUE+Style.BRIGHT}   Result :{Style.RESET_ALL}"
+                        f"{Fore.GREEN+Style.BRIGHT} Successful: {datasets_successful}/{datasets_remaining} {Style.RESET_ALL}"
+                        f"{Fore.CYAN+Style.BRIGHT} | {Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} Attempts: {datasets_tried} {Style.RESET_ALL}"
+                    )
                 else:
                     self.log(
                         f"{Fore.BLUE+Style.BRIGHT}   Status :{Style.RESET_ALL}"
